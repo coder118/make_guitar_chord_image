@@ -4,8 +4,11 @@ from io import BytesIO
 
 import os
 import google.generativeai as genai
-from flask import request, jsonify
+from flask import request, jsonify,render_template
 from dotenv import load_dotenv
+from pybo.models import GuitarCode
+from pybo import db
+import json
 
 
 bp = Blueprint('main', __name__, url_prefix='/')
@@ -28,13 +31,16 @@ def generate_text():
     print(response.text)
 
 
-@bp.route('/')
+@bp.route('/', methods=['GET', 'POST'])
 def index():
-    return 'Pybo index'
+    if request.method == 'POST':
+        code = request.form['code']
+        return create_fretboard(code)
+    return render_template('index.html')
 
 import re
 
-def parse_gpt_response(gpt_response):
+def parse_gpt_response(gpt_response): #ai가 알려준 좌표값을 분류하는 함수
     coordinates = []
     mute = []
     first_x = None #들어오는 첫 좌표값이 2를 넘어가게 되면 이미지 범위를 초과할 경우를 예상해서 첫번쨰 좌표값을 저장한다. 
@@ -71,7 +77,11 @@ def create_coordinate_system():
     return coordinates
 
 @bp.route('/line')
-def create_fretboard():
+def create_fretboard(code=None):
+    
+    if code is None:
+        code = request.args.get('code')
+    
     img = Image.new('RGB', (800, 600), color='white')
     draw = ImageDraw.Draw(img)
     
@@ -86,27 +96,46 @@ def create_fretboard():
         x = 50 + i * 100
         draw.line((x, 100, x, 500), fill='black', width=1)
     
-        
-    # X 표시 추가 (맨 아래 선 왼쪽)
-    # draw.line((30, 480, 50, 520), fill='black', width=2)
-    # draw.line((30, 520, 50, 480), fill='black', width=2)
-    
-    # # "3fr" 텍스트 추가 (맨 위 선 위)
-    # font = ImageFont.truetype("arial.ttf", 20)  # 폰트 파일 경로와 크기 지정
-    # draw.text((100, 70), "3fr", fill='black', font=font)
-    
-     
+ 
     coordinates = create_coordinate_system()
     
-    gpt_response = """(1,1)/(1,2)/(1,3)/(1,4)/(1,5)/(1,6)
-(3,3)
-(3,5)
-(2,4)
+    gpt_response = """(2,1)/(2,2)/(2,3)/(2,4)/(2,5)/(2,6)
+(4,2)
+(4,3)
+(4,4)
 mute:없음"""
     
-    points_to_draw ,mute, first_x= parse_gpt_response(gpt_response)
     
-    fret_text = f"{first_x}f" if first_x > 2 else "1f"
+    
+    # 데이터베이스에서 코드 검색
+    existing_code = GuitarCode.query.filter_by(code=code).first()
+    
+    if existing_code:
+        points_to_draw = existing_code.coordinates
+        mute = existing_code.mute
+        first_x = int(points_to_draw[2])
+        points_to_draw = json.loads(points_to_draw)
+        print("db에 있는 값입니다.")
+    else:
+        # GPT API를 사용하여 새로운 좌표 생성
+        points_to_draw, mute,first_x = parse_gpt_response(gpt_response) #원래는 parse_gpt_response(generate_text())를 넣어서 바로 ai가 검색할 수 있게 해야 함
+        
+        # 새로운 코드를 데이터베이스에 저장
+        new_code = GuitarCode(code=code)
+        new_code.coordinates_list = points_to_draw # 파이썬의 리스트 형태로 sqlite에 넣을 수 가 없어서 json형태를 사용
+        new_code.mute_list = mute
+        db.session.add(new_code)
+        db.session.commit()
+    
+    
+    
+    
+    
+    
+    
+    #points_to_draw ,mute, first_x= parse_gpt_response(gpt_response)
+    
+    fret_text = f"{first_x}f" if first_x > 2 else "1f"#총 이미지로 표현할 수 있는 이미지가 5줄. 첫번째 잡는 좌표값이 3플랫이면 이미지 범위를 초과할 경우가 생길것을 방지해서 2가 넘어가면 줄 아래에 플랫의 번호를 적게 시킴
     font = ImageFont.truetype("arial.ttf", 20)
     draw.text((90, 30), fret_text, fill='black', font=font)
     
@@ -119,16 +148,28 @@ mute:없음"""
             draw.ellipse((x-circle_radius, y-circle_radius-40, x+circle_radius, y+circle_radius-40), fill='black')
     
      # Mute된 줄에 X 표시 그리기
-    for string in mute:
-        y = 100 + (string - 1) * 80
-        draw.line((30, y-10, 50, y+10), fill='red', width=2)
-        draw.line((30, y+10, 50, y-10), fill='red', width=2)
-    
+    if mute is not None and mute: # mute가 none 값으로 잡히는 경우가 있다. 
+        for string in mute:
+            y = 100 + (string - 1) * 80
+            draw.line((30, y-10, 50, y+10), fill='red', width=2)
+            draw.line((30, y+10, 50, y-10), fill='red', width=2)
+        
     #플라스크에서 이미지를 만들수 없어서 사용
     img_io = BytesIO()
     img.save(img_io, 'PNG')
     img_io.seek(0)
     
-    #generate_text()
+    #generate_text() #api 이용하는 코드
     
     return send_file(img_io, mimetype='image/png')
+
+
+
+
+
+#https://rominlamp.tistory.com/22      -- env파일과 관련된 정보
+
+# from pybo.models import GuitarCode  
+# >>> print(GuitarCode.__table__) 
+# guitar_code
+# >>> print(GuitarCode.__table__.columns) flask shell에서 db 테이블 속성 정보 확인 법
